@@ -81,12 +81,15 @@ Rules:
    - GET <endpointPath>/{id} returns correct row for an existing ID (HTTP 200)
    - GET <endpointPath>/{id} with a non-existent ID returns HTTP 404
    Use httptest.NewRecorder and httptest.NewServer as appropriate.
-9. Output EXACTLY two fenced Go code blocks in this order:
+9. Output EXACTLY three fenced code blocks in this order:
    ` + "```go server.go" + `
    <server code here>
    ` + "```" + `
    ` + "```go server_test.go" + `
    <test code here>
+   ` + "```" + `
+   ` + "```markdown usage.md" + `
+   <A personalized usage guide with specific curl examples for using the API. Make sure to use the actual endpoints, filters, sorts and specific IDs from the dataset. Use $SERVER_URL as a placeholder for the base URL, like $SERVER_URL/endpoint>
    ` + "```" + `
    No prose, no explanation outside the code blocks.`
 

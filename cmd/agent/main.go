@@ -125,6 +125,7 @@ func main() {
 	var (
 		serverURL   string
 		lastFailure string
+		finalUsage  string
 	)
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -144,9 +145,10 @@ func main() {
 
 		serverGo, ok1 := extractCodeBlock(rawCode, "server.go")
 		serverTestGo, ok2 := extractCodeBlock(rawCode, "server_test.go")
-		if !ok1 || !ok2 {
-			lastFailure = "The response did not contain the required ```go server.go and " +
-				"```go server_test.go code blocks. You MUST output exactly those two fenced blocks."
+		usageMd, ok3 := extractCodeBlock(rawCode, "usage.md")
+		if !ok1 || !ok2 || !ok3 {
+			lastFailure = "The response did not contain the required ```go server.go, " +
+				"```go server_test.go, and ```markdown usage.md code blocks. You MUST output exactly those three fenced blocks."
 			fmt.Printf("   ⚠  Missing code blocks in LLM response (attempt %d)\n", attempt)
 			continue
 		}
@@ -154,6 +156,7 @@ func main() {
 		if err := executor.WriteFiles(sandboxDir, map[string]string{
 			"server.go":      serverGo,
 			"server_test.go": serverTestGo,
+			"usage.md":       usageMd,
 		}); err != nil {
 			log.Fatalf("❌ Write sandbox files: %v", err)
 		}
@@ -170,6 +173,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("❌ Start server: %v", err)
 			}
+			finalUsage = strings.ReplaceAll(usageMd, "$SERVER_URL", serverURL)
 			break
 		}
 
@@ -185,9 +189,8 @@ func main() {
 	if serverURL != "" {
 		printSection("Server Ready")
 		fmt.Printf("🌐  %s\n\n", serverURL)
-		fmt.Printf("Try it:\n  curl %s%s\n  curl %s%s/123\n  curl \"%s%s?sort=<col>&filter=<col>:<val>\"\n\n",
-			serverURL, sd.EndpointPath, serverURL, sd.EndpointPath, serverURL, sd.EndpointPath)
-		fmt.Println("Press Ctrl+C to stop.")
+		fmt.Println(finalUsage)
+		fmt.Println("\nPress Ctrl+C to stop.")
 		<-ctx.Done()
 		fmt.Println("\n👋 Shutting down.")
 	}
@@ -252,7 +255,7 @@ SchemaDefinition JSON – use this EXACTLY to define your Go struct and handlers
 %s
 
 Follow all rules in your system prompt strictly.
-Output ONLY the two fenced code blocks (server.go then server_test.go).`, resourceName, csvPath, schemaJSON)
+Output ONLY the three fenced code blocks (server.go, server_test.go, and usage.md).`, resourceName, csvPath, schemaJSON)
 }
 
 func buildRetryPrompt(schemaJSON, failureOutput string) string {
@@ -270,7 +273,7 @@ func buildRetryPrompt(schemaJSON, failureOutput string) string {
 The SchemaDefinition is unchanged:
 %s
 
-Fix ALL errors. Output ONLY the two fenced code blocks.`, out, schemaJSON)
+Fix ALL errors. Output ONLY the three fenced code blocks.`, out, schemaJSON)
 }
 
 // ── Code block extraction ─────────────────────────────────────────────────────
@@ -278,7 +281,7 @@ Fix ALL errors. Output ONLY the two fenced code blocks.`, out, schemaJSON)
 // extractCodeBlock finds a ```go <filename>\n...\n``` fence in raw and returns
 // its content trimmed of surrounding whitespace.
 func extractCodeBlock(raw, filename string) (string, bool) {
-	re := regexp.MustCompile("(?i)```go[ \t]+" + regexp.QuoteMeta(filename) + `[ \t]*\r?\n`)
+	re := regexp.MustCompile("(?i)```[a-z]*[ \t]+" + regexp.QuoteMeta(filename) + `[ \t]*\r?\n`)
 	loc := re.FindStringIndex(raw)
 	if loc == nil {
 		return "", false
