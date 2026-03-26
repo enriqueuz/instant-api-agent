@@ -1,0 +1,4 @@
+.env
+sandbox/*.go
+sandbox/go.mod
+sandbox/go.sum

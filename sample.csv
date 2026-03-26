@@ -1,0 +1,7 @@
+id,name,email,price,created_at
+1,Alice Johnson,alice@example.com,49.99,2024-01-15
+2,Bob Smith,bob@example.com,129.00,2024-02-20
+3,Carol White,carol@example.com,19.50,2024-03-05
+4,Dan Lee,dan@example.com,299.99,2024-03-18
+5,Eve Torres,eve@example.com,9.99,2024-04-01
+6,Frank Moore,frank@example.com,75.00,2024-04-22
