@@ -7,10 +7,11 @@ import (
 
 const validJSON = `{
   "resourceName": "Product",
+  "endpointPath": "/products",
   "columns": [
-    {"name": "id",    "goType": "int64",   "validation": "none",     "description": "Unique identifier"},
-    {"name": "email", "goType": "string",  "validation": "email",    "description": "User email"},
-    {"name": "price", "goType": "decimal", "validation": "positive", "description": "Item price"}
+    {"name": "id",    "goType": "int64",   "isIdentifier": true,  "validation": "none",     "description": "Unique identifier"},
+    {"name": "email", "goType": "string",  "isIdentifier": false, "validation": "email",    "description": "User email"},
+    {"name": "price", "goType": "decimal", "isIdentifier": false, "validation": "positive", "description": "Item price"}
   ]
 }`
 

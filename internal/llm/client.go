@@ -23,11 +23,13 @@ import (
 const schemaSystemPrompt = `You are a data analyst. Given CSV headers and sample rows, return ONLY a JSON code block matching this exact schema (no prose, no explanation):
 
 {
-  "resourceName": "<singular PascalCase name for the data entity>",
+  "resourceName": "<singular PascalCase name for the data entity, e.g., User>",
+  "endpointPath": "<plural lowercase endpoint path based on the entity, e.g., /users>",
   "columns": [
     {
       "name":        "<original column header>",
       "goType":      "<Go type: string | int64 | float64 | decimal | bool | time.Time>",
+      "isIdentifier": <true | false>,
       "validation":  "<none | email | url | positive | non-empty>",
       "description": "<one-sentence semantic description>"
     }
@@ -38,6 +40,7 @@ Rules:
 - Choose goType=decimal for any monetary, price, amount, cost, or total column.
 - Choose goType=time.Time for any date or datetime column.
 - Choose goType=int64 for whole-number identifiers or counts.
+- Set isIdentifier=true for exactly ONE column that best serves as the unique ID for the row (prefer columns named "id", "uuid", "code", "email", or similar). All other columns must be false.
 - Choose validation=email for any column whose name contains "email".
 - Choose validation=positive for decimal or numeric columns that must be > 0.
 - Choose validation=non-empty for required string fields.
@@ -47,34 +50,36 @@ Rules:
 const codeSystemPrompt = `You are a Senior Go Developer. You generate only production-quality Go code.
 
 Rules:
-1. Use ONLY the Go standard library (net/http, encoding/json, encoding/csv, regexp, sort, strconv, fmt, log, os).
+1. Use ONLY the Go standard library (net/http, encoding/json, encoding/csv, regexp, sort, strconv, strings, fmt, log, os).
 2. Proper error handling: never ignore errors; return HTTP 500 with a JSON body {"error":"<message>"}.
 3. Clear naming: exported types and handlers, unexported helpers.
 4. The server MUST listen on ":0" (OS-assigned port) and print exactly ONE line to stdout:
        LISTENING_ON=http://localhost:<actual_port>
    Use net.Listener to obtain the actual port before starting http.Serve.
-5. Read CSV data from the file path given as os.Args[1] at startup. Do NOT embed data.
-6. Use the SchemaDefinition JSON provided to build the Go struct for data rows:
-   - goType=decimal   → parse with strconv.ParseFloat(val, 64), store as float64, marshal with 2 decimal places via fmt.Sprintf("%.2f", v)
+5. Read CSV data from the file path given as os.Args[1] at startup. Do NOT embed data. Load it into a slice of structs in memory.
+6. Use the SchemaDefinition JSON provided to build the Go struct and endpoints:
+   - The base endpoint path MUST be the SchemaDefinition's "endpointPath" (e.g., /users).
+   - The unique identifier field is the one marked with "isIdentifier": true.
+   - goType=decimal  → parse with strconv.ParseFloat(val, 64), store as float64, marshal with 2 decimal places via fmt.Sprintf("%.2f", v)
    - goType=time.Time → parse with time.Parse("2006-01-02", val) falling back to time.RFC3339
-   - goType=int64     → parse with strconv.ParseInt(val, 10, 64)
-   - goType=bool      → parse with strconv.ParseBool(val)
-   - goType=string    → use as-is
+   - goType=int64    → parse with strconv.ParseInt(val, 10, 64)
+   - goType=bool     → parse with strconv.ParseBool(val)
+   - goType=string   → use as-is
    - validation=email → validate with regexp.MustCompile(` + "`^[^@]+@[^@]+\\.[^@]+$`" + `)
    - validation=positive → return HTTP 400 if value ≤ 0
    - validation=non-empty → return HTTP 400 if value is empty string
 7. Required endpoints:
-   GET /data          → return JSON array of all rows; support optional query params:
-                          ?filter=<columnName>:<value>  (exact match, case-insensitive)
-                          ?sort=<columnName>            (lexicographic ascending)
-   GET /data/{id}     → return single row by 0-based index; HTTP 404 if out of range.
-                        Parse {id} from the URL path manually (no external router).
+   GET <endpointPath>      → return JSON array of all rows; support optional query params:
+                             ?filter=<columnName>:<value>  (exact match, case-insensitive)
+                             ?sort=<columnName>            (lexicographic ascending)
+   GET <endpointPath>/{id} → return single row by matching the {id} value from the URL against the struct field marked as the identifier. 
+                             Parse {id} from the URL path manually using strings.TrimPrefix (do not use external routers).
+                             Return HTTP 404 if no record matches the given ID.
 8. Write comprehensive tests in server_test.go covering:
-   - GET /data returns all rows (HTTP 200)
-   - GET /data with ?filter=... returns filtered rows
-   - GET /data/{id} returns correct row (HTTP 200)
-   - GET /data/{id} with out-of-range id returns HTTP 404
-   - GET /data/{id} with non-numeric id returns HTTP 400
+   - GET <endpointPath> returns all rows (HTTP 200)
+   - GET <endpointPath> with ?filter=... returns filtered rows
+   - GET <endpointPath>/{id} returns correct row for an existing ID (HTTP 200)
+   - GET <endpointPath>/{id} with a non-existent ID returns HTTP 404
    Use httptest.NewRecorder and httptest.NewServer as appropriate.
 9. Output EXACTLY two fenced Go code blocks in this order:
    ` + "```go server.go" + `

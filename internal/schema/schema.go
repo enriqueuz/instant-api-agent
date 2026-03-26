@@ -16,6 +16,8 @@ type ColumnSchema struct {
 	// GoType is the recommended Go type for this column.
 	// Allowed values: "string", "int64", "float64", "decimal", "bool", "time.Time"
 	GoType string `json:"goType"`
+	// IsIdentifier indicating this is the primary identity column.
+	IsIdentifier bool `json:"isIdentifier"`
 	// Validation is the validation rule to apply.
 	// Allowed values: "none", "email", "url", "positive", "non-empty"
 	Validation string `json:"validation"`
@@ -27,6 +29,8 @@ type ColumnSchema struct {
 type SchemaDefinition struct {
 	// ResourceName is a singular, PascalCase name for the data entity (e.g. "Product").
 	ResourceName string         `json:"resourceName"`
+	// EndpointPath is the URI path for this resource (e.g. "/products").
+	EndpointPath string         `json:"endpointPath"`
 	Columns      []ColumnSchema `json:"columns"`
 }
 

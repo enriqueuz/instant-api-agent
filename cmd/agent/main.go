@@ -97,10 +97,15 @@ func main() {
 	}
 
 	fmt.Printf("\n   Resource : %s\n", sd.ResourceName)
+	fmt.Printf("   Endpoint : %s\n", sd.EndpointPath)
 	fmt.Println("   Columns  :")
 	for _, col := range sd.Columns {
-		fmt.Printf("     • %-22s  type=%-12s  validation=%s\n",
-			col.Name, col.GoType, col.Validation)
+		idMarker := ""
+		if col.IsIdentifier {
+			idMarker = " (Identifier)"
+		}
+		fmt.Printf("     • %-22s  type=%-12s  validation=%-10s%s\n",
+			col.Name, col.GoType, col.Validation, idMarker)
 		if col.Description != "" {
 			fmt.Printf("       %s\n", col.Description)
 		}
@@ -180,8 +185,8 @@ func main() {
 	if serverURL != "" {
 		printSection("Server Ready")
 		fmt.Printf("🌐  %s\n\n", serverURL)
-		fmt.Printf("Try it:\n  curl %s/data\n  curl %s/data/0\n  curl \"%s/data?sort=<col>&filter=<col>:<val>\"\n\n",
-			serverURL, serverURL, serverURL)
+		fmt.Printf("Try it:\n  curl %s%s\n  curl %s%s/123\n  curl \"%s%s?sort=<col>&filter=<col>:<val>\"\n\n",
+			serverURL, sd.EndpointPath, serverURL, sd.EndpointPath, serverURL, sd.EndpointPath)
 		fmt.Println("Press Ctrl+C to stop.")
 		<-ctx.Done()
 		fmt.Println("\n👋 Shutting down.")
