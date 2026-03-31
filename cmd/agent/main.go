@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -53,6 +54,9 @@ func main() {
 
 	printBanner("Instant API Architect")
 
+	// ── 1.1. Ask for test generation preference ──────────────────────────
+	generateTests := promptForTestGeneration()
+
 	// ── 2. Parse CSV → DataProfile ───────────────────────────────────────
 	fmt.Println("📂 Parsing CSV…")
 	dp, err := parser.ParseCSV(absCSV)
@@ -68,7 +72,7 @@ func main() {
 
 	// ── 3. Initialise LLM client ─────────────────────────────────────────
 	fmt.Println("🤖 Connecting to Gemini…")
-	client, err := llm.NewClient(ctx)
+	client, err := llm.NewClient(ctx, generateTests)
 	if err != nil {
 		log.Fatalf("❌ %v", err)
 	}
@@ -81,10 +85,13 @@ func main() {
 	printSection("Phase 1 – Schema Analysis")
 	fmt.Println("📊 Analysing CSV schema with Gemini…")
 
+	startPhase1 := time.Now()
 	rawSchema, err := client.AnalyzeSchema(ctx, dpJSON)
+	elapsedPhase1 := time.Since(startPhase1)
 	if err != nil {
 		log.Fatalf("❌ Schema analysis failed: %v", err)
 	}
+	fmt.Printf("⏱️  Phase 1 Gemini response took: %s\n", elapsedPhase1)
 
 	sd, err := schema.ParseSchemaFromLLM(rawSchema)
 	if err != nil {
@@ -133,42 +140,114 @@ func main() {
 
 		var prompt string
 		if attempt == 1 {
-			prompt = buildCodeGenPrompt(sdJSON, absCSV, sd.ResourceName)
+			prompt = buildCodeGenPrompt(sdJSON, absCSV, sd.ResourceName, generateTests)
 		} else {
-			prompt = buildRetryPrompt(sdJSON, lastFailure)
+			prompt = buildRetryPrompt(sdJSON, lastFailure, generateTests)
 		}
 
+		startPhase2 := time.Now()
 		rawCode, err := client.GenerateCode(ctx, prompt)
+		elapsedPhase2 := time.Since(startPhase2)
 		if err != nil {
 			log.Fatalf("❌ LLM error: %v", err)
 		}
+		fmt.Printf("⏱️  Phase 2 Gemini response took: %s\n", elapsedPhase2)
 
 		serverGo, ok1 := extractCodeBlock(rawCode, "server.go")
-		serverTestGo, ok2 := extractCodeBlock(rawCode, "server_test.go")
-		usageMd, ok3 := extractCodeBlock(rawCode, "usage.md")
-		if !ok1 || !ok2 || !ok3 {
-			lastFailure = "The response did not contain the required ```go server.go, " +
-				"```go server_test.go, and ```markdown usage.md code blocks. You MUST output exactly those three fenced blocks."
-			fmt.Printf("   ⚠  Missing code blocks in LLM response (attempt %d)\n", attempt)
-			continue
+		var serverTestGo string
+		var ok2 bool
+
+		if generateTests {
+			serverTestGo, ok2 = extractCodeBlock(rawCode, "server_test.go")
+			if !ok1 || !ok2 {
+				blocks := extractAllCodeBlocks(rawCode)
+				if len(blocks) >= 2 && !ok1 && !ok2 {
+					serverGo, ok1 = blocks[0], true
+					serverTestGo, ok2 = blocks[1], true
+				}
+			}
+			if !ok1 || !ok2 {
+				lastFailure = "The response did not contain the required ```go server.go and ```go server_test.go code blocks. You MUST output exactly those two fenced blocks."
+				fmt.Printf("   ⚠  Missing code blocks in LLM response (attempt %d)\n", attempt)
+				continue
+			}
+		} else {
+			if !ok1 {
+				blocks := extractAllCodeBlocks(rawCode)
+				if len(blocks) >= 1 {
+					serverGo, ok1 = blocks[0], true
+				}
+			}
+			if !ok1 {
+				lastFailure = "The response did not contain the required ```go server.go block. You MUST output exactly that one fenced block."
+				fmt.Printf("   ⚠  Missing code blocks in LLM response (attempt %d)\n", attempt)
+				continue
+			}
 		}
 
-		if err := executor.WriteFiles(sandboxDir, map[string]string{
-			"server.go":      serverGo,
-			"server_test.go": serverTestGo,
-			"usage.md":       usageMd,
-		}); err != nil {
+		filesToWrite := map[string]string{
+			"server.go": serverGo,
+		}
+		if generateTests {
+			filesToWrite["server_test.go"] = serverTestGo
+		}
+
+		if err := executor.WriteFiles(sandboxDir, filesToWrite); err != nil {
 			log.Fatalf("❌ Write sandbox files: %v", err)
 		}
 
-		fmt.Println("🧪 Running go test ./…")
-		res, err := executor.RunCommand(ctx, sandboxDir, "go", "test", "-v", "-count=1", "./...")
-		if err != nil {
-			log.Fatalf("❌ go test exec error: %v", err)
+		var res executor.RunResult
+		var execErr error
+
+		if generateTests {
+			fmt.Println("🧪 Running go test ./…")
+			res, execErr = executor.RunCommand(ctx, sandboxDir, "go", "test", "-v", "-count=1", "./...")
+		} else {
+			fmt.Println("🧪 Running go build ./… to verify compilation…")
+			res, execErr = executor.RunCommand(ctx, sandboxDir, "go", "build", "-o", os.DevNull, "./...")
+		}
+
+		if execErr != nil {
+			log.Fatalf("❌ cmd exec error: %v", execErr)
 		}
 
 		if res.Success {
-			fmt.Println("\n✅ All tests passed!")
+			if generateTests {
+				fmt.Println("\n✅ All tests passed!")
+			} else {
+				fmt.Println("\n✅ Code compiled successfully!")
+			}
+
+			fmt.Println("📝 Generating documentation with Gemini…")
+			// Retrieve server.go from the sandbox to ensure we use what was tested.
+			finalServerCode, err := os.ReadFile(filepath.Join(sandboxDir, "server.go"))
+			if err != nil {
+				log.Fatalf("❌ Read final server.go: %v", err)
+			}
+
+			rawDocs, err := client.GenerateDocs(ctx, sdJSON, string(finalServerCode))
+			if err != nil {
+				log.Fatalf("❌ GenerateDocs failed: %v", err)
+			}
+
+			usageMd, ok := extractCodeBlock(rawDocs, "usage.md")
+			if !ok {
+				// Fallback
+				blocks := extractAllCodeBlocks(rawDocs)
+				if len(blocks) == 1 {
+					usageMd = blocks[0]
+				} else {
+					log.Println("⚠ Missing usage.md code block in doc generation, using raw response.")
+					usageMd = rawDocs
+				}
+			}
+
+			if err := executor.WriteFiles(sandboxDir, map[string]string{
+				"usage.md": usageMd,
+			}); err != nil {
+				log.Fatalf("❌ Write sandbox usage.md: %v", err)
+			}
+
 			serverURL, err = streamServerUntilReady(ctx, sandboxDir, absCSV)
 			if err != nil {
 				log.Fatalf("❌ Start server: %v", err)
@@ -178,6 +257,7 @@ func main() {
 		}
 
 		lastFailure = res.Output
+		fmt.Printf("\n%s\n", res.Output)
 		fmt.Printf("\n   ⚠  Tests failed (attempt %d/%d). Sending errors to Gemini…\n\n", attempt, maxRetries)
 
 		if attempt == maxRetries {
@@ -245,8 +325,15 @@ func streamServerUntilReady(ctx context.Context, dir, csvPath string) (string, e
 
 // ── Prompt builders ───────────────────────────────────────────────────────────
 
-func buildCodeGenPrompt(schemaJSON, csvPath, resourceName string) string {
-	return fmt.Sprintf(`Generate a complete Go API server and its test file for the following dataset.
+func buildCodeGenPrompt(schemaJSON, csvPath, resourceName string, generateTests bool) string {
+	blocks := "the two fenced code blocks (server.go and server_test.go)"
+	testText := " and its test file"
+	if !generateTests {
+		blocks = "the one fenced code block (server.go)"
+		testText = ""
+	}
+
+	return fmt.Sprintf(`Generate a complete Go API server%s for the following dataset.
 
 Resource name  : %s
 CSV file path  : %s  (the server must accept this as os.Args[1])
@@ -255,16 +342,24 @@ SchemaDefinition JSON – use this EXACTLY to define your Go struct and handlers
 %s
 
 Follow all rules in your system prompt strictly.
-Output ONLY the three fenced code blocks (server.go, server_test.go, and usage.md).`, resourceName, csvPath, schemaJSON)
+Output ONLY %s.`, testText, resourceName, csvPath, schemaJSON, blocks)
 }
 
-func buildRetryPrompt(schemaJSON, failureOutput string) string {
+func buildRetryPrompt(schemaJSON, failureOutput string, generateTests bool) string {
 	const maxLen = 4000
 	out := failureOutput
 	if len(out) > maxLen {
 		out = out[:maxLen] + "\n...(truncated)"
 	}
-	return fmt.Sprintf(`The previous code failed. Analyse the errors and regenerate BOTH files.
+	
+	files := "BOTH files"
+	blocks := "the two fenced code blocks"
+	if !generateTests {
+		files = "the file"
+		blocks = "the one fenced code block"
+	}
+
+	return fmt.Sprintf(`The previous code failed. Analyse the errors and regenerate %s.
 
 --- FAILURE OUTPUT ---
 %s
@@ -273,7 +368,7 @@ func buildRetryPrompt(schemaJSON, failureOutput string) string {
 The SchemaDefinition is unchanged:
 %s
 
-Fix ALL errors. Output ONLY the three fenced code blocks.`, out, schemaJSON)
+Fix ALL errors. Output ONLY %s.`, files, out, schemaJSON, blocks)
 }
 
 // ── Code block extraction ─────────────────────────────────────────────────────
@@ -292,6 +387,17 @@ func extractCodeBlock(raw, filename string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(rest[:end]), true
+}
+
+// extractAllCodeBlocks returns the contents of all fenced code blocks found in raw.
+func extractAllCodeBlocks(raw string) []string {
+	re := regexp.MustCompile("(?s)```[a-zA-Z0-9_-]*[ \t]*\r?\n(.*?)```")
+	matches := re.FindAllStringSubmatch(raw, -1)
+	var blocks []string
+	for _, m := range matches {
+		blocks = append(blocks, strings.TrimSpace(m[1]))
+	}
+	return blocks
 }
 
 // ── Display helpers ───────────────────────────────────────────────────────────
@@ -326,4 +432,31 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func promptForTestGeneration() bool {
+	fmt.Println("\n❓ Do you want to generate automated tests for the API?")
+	fmt.Println("   Pros of enabling tests:")
+	fmt.Println("     - Ensures API correctness and prevents regressions")
+	fmt.Println("     - The agent can auto-correct mistakes by analyzing test failures")
+	fmt.Println("   Cons of enabling tests:")
+	fmt.Println("     - API generation takes slightly longer")
+	fmt.Println("     - Consumes more LLM tokens (costs and latency)")
+	fmt.Println("   (Without tests, we obtain the API faster but with less confidence)")
+	
+	for {
+		fmt.Print("\nGenerate tests? [Y/n]: ")
+		sc := bufio.NewScanner(os.Stdin)
+		if !sc.Scan() {
+			return true // default true on EOF
+		}
+		ans := strings.TrimSpace(strings.ToLower(sc.Text()))
+		if ans == "" || ans == "y" || ans == "yes" {
+			return true
+		}
+		if ans == "n" || ans == "no" {
+			return false
+		}
+		fmt.Println("Please answer Y or N.")
+	}
 }

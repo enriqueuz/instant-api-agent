@@ -47,7 +47,8 @@ Rules:
 - Choose validation=none otherwise.
 - Return ONLY the JSON code block wrapped in ` + "```json" + ` fences. No other text.`
 
-const codeSystemPrompt = `You are a Senior Go Developer. You generate only production-quality Go code.
+func getCodeSystemPrompt(generateTests bool) string {
+	base := `You are a Senior Go Developer. You generate only production-quality Go code.
 
 Rules:
 1. Use ONLY the Go standard library (net/http, encoding/json, encoding/csv, regexp, sort, strconv, strings, fmt, log, os).
@@ -69,42 +70,69 @@ Rules:
    - validation=positive → return HTTP 400 if value ≤ 0
    - validation=non-empty → return HTTP 400 if value is empty string
 7. Required endpoints:
-   GET <endpointPath>      → return JSON array of all rows; support optional query params:
-                             ?filter=<columnName>:<value>  (exact match, case-insensitive)
-                             ?sort=<columnName>            (lexicographic ascending)
+   GET <endpointPath>      → return JSON array of rows. MUST support optional query params:
+                             - Pagination: ?page=<page_number>&limit=<items_per_page>
+                             - Sorting: ?sort=<columnName>&order=<asc|desc> (default asc)
+                             - Filtering: Exact match ONLY using ?<columnName>=<value> (case-insensitive for strings). 
+                               CRITICAL: Do NOT use the "reflect" package for filtering or sorting. Implement filtering explicitly/statically for each column defined in the SchemaDefinition. Convert the query string to the correct Go type (strconv, time.Parse, etc.) before comparing. 
+                               Simply ignore any unrecognized query parameters (no strict validation).
    GET <endpointPath>/{id} → return single row by matching the {id} value from the URL against the struct field marked as the identifier. 
                              Parse {id} from the URL path manually using strings.TrimPrefix (do not use external routers).
                              Return HTTP 404 if no record matches the given ID.
-8. Write comprehensive tests in server_test.go covering:
+8. NEVER omit code for brevity. You MUST implement the full filtering, sorting, and validation logic for ALL columns.`
+
+	if generateTests {
+		return base + `
+9. Write comprehensive tests in server_test.go covering:
    - GET <endpointPath> returns all rows (HTTP 200)
-   - GET <endpointPath> with ?filter=... returns filtered rows
+   - GET <endpointPath> with pagination, sorting, and filtering returns correct rows
    - GET <endpointPath>/{id} returns correct row for an existing ID (HTTP 200)
    - GET <endpointPath>/{id} with a non-existent ID returns HTTP 404
    Use httptest.NewRecorder and httptest.NewServer as appropriate.
-9. Output EXACTLY three fenced code blocks in this order:
+10. Output EXACTLY two fenced code blocks in this order:
    ` + "```go server.go" + `
    <server code here>
    ` + "```" + `
    ` + "```go server_test.go" + `
    <test code here>
    ` + "```" + `
-   ` + "```markdown usage.md" + `
-   <A personalized usage guide with specific curl examples for using the API. Make sure to use the actual endpoints, filters, sorts and specific IDs from the dataset. Use $SERVER_URL as a placeholder for the base URL, like $SERVER_URL/endpoint>
+   No prose, no explanation outside the code blocks.`
+	}
+
+	return base + `
+9. Output EXACTLY one fenced code block:
+   ` + "```go server.go" + `
+   <server code here>
    ` + "```" + `
    No prose, no explanation outside the code blocks.`
+}
+
+const docSystemPrompt = `You are an expert Technical Writer. Given a JSON Schema and a final, working Go REST API code (server.go), generate a comprehensive usage guide (the usage.md thats currently being generated in GenerateCode).
+
+Rules:
+- Provide comprehensive curl examples showcasing ALL features generated, including:
+  - Pagination (limit and page)
+  - Sorting (asc and desc)
+  - Filtering for EVERY column (show exact matches, and for numeric/dates show range queries min_XX/max_XX).
+- Make sure to use the actual endpoints and concrete values from the dataset.
+- Use $SERVER_URL as a placeholder for the base URL.
+- Output ONLY ONE fenced markdown block: ` + "```markdown usage.md" + `
+- CRITICAL rule: DO NOT use triple backticks (` + "```" + `) anywhere INSIDE the usage.md text, as it will break our markdown parser. Use single backticks or 4-space indentation for code snippets instead.
+- No prose, no explanation outside the code block.`
 
 // ---- Client -----------------------------------------------------------------
 
-// Client wraps the Gemini SDK with two independent chat sessions.
+// Client wraps the Gemini SDK with three independent chat sessions.
 type Client struct {
 	genaiClient   *genai.Client
 	schemaSession *genai.ChatSession
 	codeSession   *genai.ChatSession
+	docSession    *genai.ChatSession
 }
 
 // NewClient creates a Client, loading GEMINI_API_KEY and GEMINI_MODEL from the
 // environment.  Call this after loading .env with godotenv.
-func NewClient(ctx context.Context) (*Client, error) {
+func NewClient(ctx context.Context, generateTests bool) (*Client, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		return nil, fmt.Errorf("llm: GEMINI_API_KEY is not set")
@@ -129,14 +157,22 @@ func NewClient(ctx context.Context) (*Client, error) {
 	// Code session – slightly higher temperature for more creative code.
 	codeModel := gc.GenerativeModel(model)
 	codeModel.SystemInstruction = &genai.Content{
-		Parts: []genai.Part{genai.Text(codeSystemPrompt)},
+		Parts: []genai.Part{genai.Text(getCodeSystemPrompt(generateTests))},
 	}
 	codeModel.SetTemperature(0.2)
+
+	// Doc session – low temperature for deterministic markdown output.
+	docModel := gc.GenerativeModel(model)
+	docModel.SystemInstruction = &genai.Content{
+		Parts: []genai.Part{genai.Text(docSystemPrompt)},
+	}
+	docModel.SetTemperature(0.1)
 
 	return &Client{
 		genaiClient:   gc,
 		schemaSession: schemaModel.StartChat(),
 		codeSession:   codeModel.StartChat(),
+		docSession:    docModel.StartChat(),
 	}, nil
 }
 
@@ -157,6 +193,13 @@ func (c *Client) AnalyzeSchema(ctx context.Context, dataProfileJSON string) (str
 // server_test.go code blocks.
 func (c *Client) GenerateCode(ctx context.Context, prompt string) (string, error) {
 	return c.sendMessage(ctx, c.codeSession, prompt)
+}
+
+// GenerateDocs sends a prompt to the Document Generation session and returns
+// the raw LLM text containing the usage.md code block.
+func (c *Client) GenerateDocs(ctx context.Context, schemaJSON string, finalServerCode string) (string, error) {
+	prompt := fmt.Sprintf("Schema:\n%s\n\nFinal Server Code:\n%s", schemaJSON, finalServerCode)
+	return c.sendMessage(ctx, c.docSession, prompt)
 }
 
 // sendMessage sends a single user message to a ChatSession and returns the
